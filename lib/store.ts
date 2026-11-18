@@ -4,8 +4,16 @@ import { Redis } from "@upstash/redis";
 // Faalt Redis (bv. database weg of offline), dan schakelen we meteen over en proberen
 // we pas na een minuut opnieuw: zo wacht niemand seconden op een time-out.
 
-const url = process.env.UPSTASH_REDIS_REST_URL;
-const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+// De Vercel-integratie maakt variabelen met een prefix aan (…_KV_REST_API_URL/TOKEN).
+// Die gaan voor, zodat een oude UPSTASH_REDIS_REST_URL nooit naar een verdwenen database wijst.
+const url =
+  process.env.UPSTASH_REDIS_REST_KV_REST_API_URL ??
+  process.env.KV_REST_API_URL ??
+  process.env.UPSTASH_REDIS_REST_URL;
+const token =
+  process.env.UPSTASH_REDIS_REST_KV_REST_API_TOKEN ??
+  process.env.KV_REST_API_TOKEN ??
+  process.env.UPSTASH_REDIS_REST_TOKEN;
 const redis = url && token ? new Redis({ url, token, retry: false }) : null;
 
 const REDIS_TIMEOUT_MS = 1500;
