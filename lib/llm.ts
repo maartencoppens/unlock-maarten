@@ -35,7 +35,7 @@ async function callApi(model: string, messages: object[], jsonMode: boolean, sig
     body: JSON.stringify({
       model,
       max_tokens: MAX_TOKENS,
-      temperature: 0.7,
+      temperature: 0.5, // lager = minder verzinsels
       messages,
       ...(jsonMode ? { response_format: { type: "json_object" } } : {}),
       ...(model.includes("gpt-oss") ? { reasoning_effort: "low", include_reasoning: false } : {}),
