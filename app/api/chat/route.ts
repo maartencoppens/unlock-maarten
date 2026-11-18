@@ -9,9 +9,12 @@ import { incrementCounter } from "@/lib/store";
 const PER_IP_PER_MINUTE = 15;
 const PER_VISITOR_TOTAL = 40;
 const GLOBAL_PER_DAY = 400;
-const MAX_HISTORY = 12;
+const MAX_HISTORY = 8; // minder geschiedenis = minder tokens per vraag
 const MAX_CHARS = 600;
 const HINT_AFTER_MISSES = 3;
+
+// Ruimte voor één keer wachten als de API-limiet even vol zit
+export const maxDuration = 30;
 
 function fail(status: number, error: string) {
   return NextResponse.json({ error }, { status });
@@ -71,7 +74,10 @@ export async function POST(request: Request) {
       history,
       request.signal,
     );
-  } catch {
+  } catch (error) {
+    if (error instanceof Error && error.message === "busy") {
+      return fail(503, "Er stellen nu veel mensen tegelijk vragen. Probeer het over een paar seconden opnieuw.");
+    }
     return fail(502, "Ik ben even offline. Probeer het zo meteen opnieuw.");
   }
 

@@ -3,14 +3,29 @@
 export type ChatMessage = { role: "user" | "assistant"; content: string };
 export type ModelAnswer = { reply: string; unlocked: unknown[] };
 
-const MAX_TOKENS = 700; // denkmodellen tellen hun redenering hierin mee
+// Groq rekent max_tokens mee in de limiet per minuut: houd dit dus krap.
+// Denkmodellen tellen hun redenering hierin mee, vandaar niet lager.
+const MAX_TOKENS = 450;
+/** Langer wachten dan dit doen we niet: dan liever een nette foutmelding. */
+const MAX_WAIT_SECONDS = 12;
 
 export function isModelConfigured() {
   return Boolean(process.env.ASK_API_URL);
 }
 
-async function callApi(messages: object[], jsonMode: boolean, signal: AbortSignal) {
-  const model = process.env.ASK_MODEL ?? "";
+/**
+ * Modellen in volgorde van voorkeur. Bij Groq heeft elk model een eigen limiet per minuut,
+ * dus als het eerste vol zit, kan het tweede vaak nog wel.
+ */
+function models(): string[] {
+  const primary = process.env.ASK_MODEL ?? "";
+  const fallback =
+    process.env.ASK_FALLBACK_MODEL ??
+    (process.env.ASK_API_URL?.includes("groq.com") ? "openai/gpt-oss-20b" : "");
+  return [primary, fallback].filter((m, i, all) => m && all.indexOf(m) === i);
+}
+
+async function callApi(model: string, messages: object[], jsonMode: boolean, signal: AbortSignal) {
   return fetch(process.env.ASK_API_URL as string, {
     method: "POST",
     headers: {
@@ -27,6 +42,14 @@ async function callApi(messages: object[], jsonMode: boolean, signal: AbortSigna
     }),
     signal,
   });
+}
+
+/** Hoeveel seconden de API wil dat we wachten (header of "try again in 9.3s" in de foutmelding). */
+function retryAfterSeconds(response: Response, body: string): number {
+  const header = Number(response.headers.get("retry-after"));
+  if (Number.isFinite(header) && header > 0) return header;
+  const match = body.match(/try again in ([\d.]+)s/i);
+  return match?.[1] ? Number(match[1]) : MAX_WAIT_SECONDS + 1;
 }
 
 /** Haalt {reply, unlocked} uit het antwoord, ook als het model er tekst omheen zette. */
@@ -51,20 +74,43 @@ export function parseAnswer(content: string): ModelAnswer {
   return { reply: content.trim(), unlocked: [] };
 }
 
+async function tryModel(model: string, messages: object[], signal: AbortSignal) {
+  let response = await callApi(model, messages, true, signal);
+  // Niet elk model kent JSON-modus: dan opnieuw zonder (de prompt vraagt toch JSON)
+  if (response.status === 400) response = await callApi(model, messages, false, signal);
+  return response;
+}
+
 export async function askModel(
   system: string,
   history: ChatMessage[],
   signal: AbortSignal,
 ): Promise<ModelAnswer> {
   const messages = [{ role: "system", content: system }, ...history];
+  const [primary, ...fallbacks] = models();
+  if (!primary) throw new Error("no model");
 
-  let response = await callApi(messages, true, signal);
-  // Niet elk model kent JSON-modus: dan opnieuw zonder (de prompt vraagt toch JSON)
-  if (response.status === 400) response = await callApi(messages, false, signal);
+  let response = await tryModel(primary, messages, signal);
+  let waitFor = 0;
+
+  // Limiet bereikt: eerst een ander model proberen, anders even wachten en opnieuw
+  if (response.status === 429) {
+    waitFor = retryAfterSeconds(response, await response.text());
+    for (const model of fallbacks) {
+      response = await tryModel(model, messages, signal);
+      if (response.status !== 429) break;
+      waitFor = Math.min(waitFor, retryAfterSeconds(response, await response.text()));
+    }
+    if (response.status === 429 && waitFor <= MAX_WAIT_SECONDS) {
+      await new Promise((resolve) => setTimeout(resolve, Math.ceil(waitFor * 1000) + 300));
+      response = await tryModel(primary, messages, signal);
+    }
+  }
 
   if (!response.ok) {
-    console.error("Model error", response.status, (await response.text()).slice(0, 300));
-    throw new Error("upstream");
+    const detail = await response.text().catch(() => "");
+    console.error("Model error", response.status, detail.slice(0, 300));
+    throw new Error(response.status === 429 ? "busy" : "upstream");
   }
 
   const data = (await response.json()) as { choices?: { message?: { content?: string } }[] };
